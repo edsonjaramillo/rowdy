@@ -152,6 +152,22 @@ local transport = require("rowdy.transport")
 ---@field distillable? boolean
 ---@field zero_data_retention? true
 ---@field region? 'eu'
+---@field sort? 'most-popular'|'newest'|'top-weekly'|'pricing-low-to-high'|'pricing-high-to-low'|'context-high-to-low'|'throughput-high-to-low'|'latency-low-to-high'|'intelligence-high-to-low'|'coding-high-to-low'|'agentic-high-to-low'|'design-arena-elo-high-to-low'
+---@field minimum_context_length? integer
+---@field minimum_input_price? number
+---@field maximum_input_price? number
+---@field minimum_output_price? number
+---@field maximum_output_price? number
+---@field minimum_age_days? integer
+---@field maximum_age_days? integer
+---@field minimum_intelligence_index? number
+---@field maximum_intelligence_index? number
+---@field minimum_coding_index? number
+---@field maximum_coding_index? number
+---@field minimum_agentic_index? number
+---@field maximum_agentic_index? number
+---@field minimum_tool_success_rate? number
+---@field maximum_tool_success_rate? number
 ---@field on_complete fun(result: RowdyModel[])
 ---@field on_error fun(error: RowdyError)
 
@@ -243,6 +259,22 @@ local model_option_fields = {
 	distillable = true,
 	zero_data_retention = true,
 	region = true,
+	sort = true,
+	minimum_context_length = true,
+	minimum_input_price = true,
+	maximum_input_price = true,
+	minimum_output_price = true,
+	maximum_output_price = true,
+	minimum_age_days = true,
+	maximum_age_days = true,
+	minimum_intelligence_index = true,
+	maximum_intelligence_index = true,
+	minimum_coding_index = true,
+	maximum_coding_index = true,
+	minimum_agentic_index = true,
+	maximum_agentic_index = true,
+	minimum_tool_success_rate = true,
+	maximum_tool_success_rate = true,
 	on_complete = true,
 	on_error = true,
 }
@@ -263,6 +295,20 @@ local model_categories = {
 }
 local input_modalities = { text = true, image = true, audio = true, file = true }
 local output_modalities = { text = true, image = true, audio = true, embeddings = true, all = true }
+local model_sorts = {
+	["most-popular"] = true,
+	newest = true,
+	["top-weekly"] = true,
+	["pricing-low-to-high"] = true,
+	["pricing-high-to-low"] = true,
+	["context-high-to-low"] = true,
+	["throughput-high-to-low"] = true,
+	["latency-low-to-high"] = true,
+	["intelligence-high-to-low"] = true,
+	["coding-high-to-low"] = true,
+	["agentic-high-to-low"] = true,
+	["design-arena-elo-high-to-low"] = true,
+}
 
 local function validate_options(opts)
 	if type(opts) ~= "table" then
@@ -365,6 +411,67 @@ local function validate_model_options(opts)
 	if opts.region ~= nil and opts.region ~= "eu" then
 		error('get_models: region must be "eu"', 3)
 	end
+	if opts.sort ~= nil and not model_sorts[opts.sort] then
+		error("get_models: sort is not supported", 3)
+	end
+
+	local function validate_number(field, integer, maximum)
+		local value = opts[field]
+		if value == nil then
+			return
+		end
+		local valid = type(value) == "number"
+			and value == value
+			and value ~= math.huge
+			and value ~= -math.huge
+			and (not integer or value % 1 == 0)
+			and value >= (field == "minimum_context_length" and 1 or 0)
+			and (maximum == nil or value <= maximum)
+		if not valid then
+			local domain = field == "minimum_context_length" and "an integer of at least 1"
+				or integer and "a non-negative integer"
+				or maximum and "a finite number between 0 and 1"
+				or "a finite non-negative number"
+			error(("get_models: %s must be %s"):format(field, domain), 3)
+		end
+	end
+
+	validate_number("minimum_context_length", true)
+	for _, field in ipairs({ "minimum_age_days", "maximum_age_days" }) do
+		validate_number(field, true)
+	end
+	for _, field in ipairs({
+		"minimum_input_price",
+		"maximum_input_price",
+		"minimum_output_price",
+		"maximum_output_price",
+		"minimum_intelligence_index",
+		"maximum_intelligence_index",
+		"minimum_coding_index",
+		"maximum_coding_index",
+		"minimum_agentic_index",
+		"maximum_agentic_index",
+	}) do
+		validate_number(field, false)
+	end
+	for _, field in ipairs({ "minimum_tool_success_rate", "maximum_tool_success_rate" }) do
+		validate_number(field, false, 1)
+	end
+
+	for _, range in ipairs({
+		{ "minimum_input_price", "maximum_input_price" },
+		{ "minimum_output_price", "maximum_output_price" },
+		{ "minimum_age_days", "maximum_age_days" },
+		{ "minimum_intelligence_index", "maximum_intelligence_index" },
+		{ "minimum_coding_index", "maximum_coding_index" },
+		{ "minimum_agentic_index", "maximum_agentic_index" },
+		{ "minimum_tool_success_rate", "maximum_tool_success_rate" },
+	}) do
+		local minimum, maximum = opts[range[1]], opts[range[2]]
+		if minimum ~= nil and maximum ~= nil and minimum > maximum then
+			error(("get_models: %s must not exceed %s"):format(range[1], range[2]), 3)
+		end
+	end
 end
 
 local function model_path(opts)
@@ -401,6 +508,22 @@ local function model_path(opts)
 	add("distillable", opts.distillable ~= nil and tostring(opts.distillable) or nil)
 	add("zdr", opts.zero_data_retention and "true" or nil)
 	add("region", opts.region)
+	add("sort", opts.sort)
+	add("context", opts.minimum_context_length)
+	add("min_price", opts.minimum_input_price)
+	add("max_price", opts.maximum_input_price)
+	add("min_output_price", opts.minimum_output_price)
+	add("max_output_price", opts.maximum_output_price)
+	add("min_age_days", opts.minimum_age_days)
+	add("max_age_days", opts.maximum_age_days)
+	add("min_intelligence_index", opts.minimum_intelligence_index)
+	add("max_intelligence_index", opts.maximum_intelligence_index)
+	add("min_coding_index", opts.minimum_coding_index)
+	add("max_coding_index", opts.maximum_coding_index)
+	add("min_agentic_index", opts.minimum_agentic_index)
+	add("max_agentic_index", opts.maximum_agentic_index)
+	add("min_tool_success_rate", opts.minimum_tool_success_rate)
+	add("max_tool_success_rate", opts.maximum_tool_success_rate)
 	return #query > 0 and "/models?" .. table.concat(query, "&") or "/models"
 end
 

@@ -280,6 +280,146 @@ test("encodes documented categorical Model filters without implicit modalities",
 	vim.env.OPENROUTER_API_KEY = previous_key
 end)
 
+test("encodes documented numeric Model constraints and sorting", function()
+	local requests = {}
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			table.insert(requests, request)
+			callback(nil, { status = 200, body = '{"data":[]}' })
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+
+	rowdy.get_models({
+		sort = "coding-high-to-low",
+		minimum_context_length = 1,
+		minimum_input_price = 0,
+		maximum_input_price = 12.5,
+		minimum_output_price = 0.25,
+		maximum_output_price = 20,
+		minimum_age_days = 0,
+		maximum_age_days = 365,
+		minimum_intelligence_index = 0,
+		maximum_intelligence_index = 100.5,
+		minimum_coding_index = 10,
+		maximum_coding_index = 90,
+		minimum_agentic_index = 2.5,
+		maximum_agentic_index = 75.25,
+		minimum_tool_success_rate = 0,
+		maximum_tool_success_rate = 1,
+		on_complete = function() end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+
+	assert_equal(
+		"/models?sort=coding-high-to-low&context=1&min_price=0&max_price=12.5"
+			.. "&min_output_price=0.25&max_output_price=20&min_age_days=0&max_age_days=365"
+			.. "&min_intelligence_index=0&max_intelligence_index=100.5"
+			.. "&min_coding_index=10&max_coding_index=90"
+			.. "&min_agentic_index=2.5&max_agentic_index=75.25"
+			.. "&min_tool_success_rate=0&max_tool_success_rate=1",
+		requests[1].path
+	)
+
+	local sorts = {
+		"most-popular",
+		"newest",
+		"top-weekly",
+		"pricing-low-to-high",
+		"pricing-high-to-low",
+		"context-high-to-low",
+		"throughput-high-to-low",
+		"latency-low-to-high",
+		"intelligence-high-to-low",
+		"coding-high-to-low",
+		"agentic-high-to-low",
+		"design-arena-elo-high-to-low",
+	}
+	for _, sort in ipairs(sorts) do
+		rowdy.get_models({
+			sort = sort,
+			on_complete = function() end,
+			on_error = function(err)
+				error(vim.inspect(err))
+			end,
+		})
+		assert_equal("/models?sort=" .. sort, requests[#requests].path)
+	end
+
+	rowdy.get_models({
+		minimum_input_price = 1,
+		maximum_input_price = 1,
+		minimum_tool_success_rate = 0.5,
+		maximum_tool_success_rate = 0.5,
+		on_complete = function() end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+	assert_equal(
+		"/models?min_price=1&max_price=1&min_tool_success_rate=0.5&max_tool_success_rate=0.5",
+		requests[#requests].path
+	)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("rejects malformed numeric Model constraints and inverted ranges", function()
+	local request_count = 0
+	local rowdy = load_rowdy({
+		request = function()
+			request_count = request_count + 1
+			return function() end
+		end,
+	})
+	local valid = {
+		on_complete = function() end,
+		on_error = function() end,
+	}
+	local invalid_options = {
+		vim.tbl_extend("force", valid, { sort = "price" }),
+		vim.tbl_extend("force", valid, { minimum_context_length = 0 }),
+		vim.tbl_extend("force", valid, { minimum_context_length = 1.5 }),
+		vim.tbl_extend("force", valid, { minimum_input_price = "0" }),
+		vim.tbl_extend("force", valid, { maximum_input_price = -0.1 }),
+		vim.tbl_extend("force", valid, { minimum_output_price = 0 / 0 }),
+		vim.tbl_extend("force", valid, { maximum_output_price = math.huge }),
+		vim.tbl_extend("force", valid, { minimum_age_days = -1 }),
+		vim.tbl_extend("force", valid, { maximum_age_days = 1.5 }),
+		vim.tbl_extend("force", valid, { minimum_intelligence_index = -1 }),
+		vim.tbl_extend("force", valid, { maximum_coding_index = 0 / 0 }),
+		vim.tbl_extend("force", valid, { minimum_agentic_index = -0.01 }),
+		vim.tbl_extend("force", valid, { minimum_tool_success_rate = -0.01 }),
+		vim.tbl_extend("force", valid, { maximum_tool_success_rate = 1.01 }),
+		vim.tbl_extend("force", valid, { minimum_input_price = 2, maximum_input_price = 1 }),
+		vim.tbl_extend("force", valid, { minimum_output_price = 2, maximum_output_price = 1 }),
+		vim.tbl_extend("force", valid, { minimum_age_days = 2, maximum_age_days = 1 }),
+		vim.tbl_extend(
+			"force",
+			valid,
+			{ minimum_intelligence_index = 2, maximum_intelligence_index = 1 }
+		),
+		vim.tbl_extend("force", valid, { minimum_coding_index = 2, maximum_coding_index = 1 }),
+		vim.tbl_extend("force", valid, { minimum_agentic_index = 2, maximum_agentic_index = 1 }),
+		vim.tbl_extend(
+			"force",
+			valid,
+			{ minimum_tool_success_rate = 0.8, maximum_tool_success_rate = 0.7 }
+		),
+	}
+
+	for _, options in ipairs(invalid_options) do
+		local ok, err = pcall(rowdy.get_models, options)
+		assert(not ok, "invalid numeric options did not raise")
+		assert(type(err) == "string" and err:match("get_models"), "error lacked context")
+	end
+	assert_equal(0, request_count)
+end)
+
 test("rejects invalid Model discovery options before starting transport", function()
 	local request_count = 0
 	local rowdy = load_rowdy({
