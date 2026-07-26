@@ -1,0 +1,62 @@
+#!/bin/sh
+
+config=$(cat)
+
+if [ "$*" != "-q --config -" ]; then
+	printf '%s\n' "unsafe curl arguments: $*" >&2
+	exit 2
+fi
+
+case "$*" in
+	*"$OPENROUTER_API_KEY"*)
+		printf '%s\n' "API key appeared in curl arguments" >&2
+		exit 2
+		;;
+esac
+
+for required in \
+	"Authorization: Bearer $OPENROUTER_API_KEY" \
+	'connect-timeout = "10"' \
+	'max-time = "30"'
+do
+	case "$config" in
+		*"$required"*) ;;
+		*)
+			printf '%s\n' "missing curl config: $required" >&2
+			exit 2
+			;;
+	esac
+done
+
+if [ "$ROWDY_CURL_SCENARIO" = "cancel" ]; then
+	printf '%s\n' "$$" > "$ROWDY_CURL_STATE"
+	exec sleep 30
+fi
+
+count=0
+if [ -f "$ROWDY_CURL_STATE" ]; then
+	read -r count < "$ROWDY_CURL_STATE"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$ROWDY_CURL_STATE"
+
+if [ "$ROWDY_CURL_SCENARIO" = "retry" ] && [ "$count" -lt 3 ]; then
+	printf '%s\n' \
+		'{"error":{"message":"temporarily unavailable"}}' \
+		'__ROWDY_HTTP_STATUS__:503' \
+		'__ROWDY_RETRY_AFTER__:'
+	exit 0
+fi
+
+if [ "$ROWDY_CURL_SCENARIO" = "backoff" ]; then
+	printf '%s\n' \
+		'{"error":{"message":"temporarily unavailable"}}' \
+		'__ROWDY_HTTP_STATUS__:503' \
+		"__ROWDY_RETRY_AFTER__:$ROWDY_RETRY_AFTER"
+	exit 0
+fi
+
+printf '%s\n' \
+	'{"data":{"id":"openai/gpt-4o-mini","endpoints":[{"tag":"openai"}]}}' \
+	'__ROWDY_HTTP_STATUS__:200' \
+	'__ROWDY_RETRY_AFTER__:'

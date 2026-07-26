@@ -5,3 +5,9 @@ tasks:
   format:
     cmd: stylua .
     silent: true
+  test:
+    cmd: nvim --headless -u NONE -l tests/run.lua
+    silent: true
+  typecheck:
+    cmd: lua-language-server --check=. --checklevel=Warning
+    silent: true
