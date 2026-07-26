@@ -10,9 +10,11 @@ local M = {}
 ---@class RowdyTransportRequest
 ---@field model? string
 ---@field path? string
+---@field method? 'GET'|'POST'
 ---@field api_key string
 ---@field connect_timeout integer
----@field total_timeout integer
+---@field total_timeout? integer
+---@field body? string
 ---@field retry? RowdyRetryOptions
 
 ---@class RowdyTransportResponse
@@ -52,16 +54,26 @@ local function curl_config(request)
 		"silent",
 		"show-error",
 		"location",
-		"request = " .. config_value("GET"),
+		"request = " .. config_value(request.method or "GET"),
 		"url = " .. config_value("https://openrouter.ai/api/v1" .. path),
 		"header = " .. config_value("Authorization: Bearer " .. request.api_key),
 		"header = " .. config_value("Accept: application/json"),
 		"connect-timeout = " .. config_value(request.connect_timeout),
-		"max-time = " .. config_value(request.total_timeout),
-		"write-out = " .. config_value(
-			("\n%s:%%{http_code}\n%s:%%header{retry-after}"):format(status_marker, retry_marker)
-		),
 	}
+	if request.body then
+		table.insert(lines, "header = " .. config_value("Content-Type: application/json"))
+		table.insert(lines, "data = " .. config_value(request.body))
+	end
+	if request.total_timeout then
+		table.insert(lines, "max-time = " .. config_value(request.total_timeout))
+	end
+	table.insert(
+		lines,
+		"write-out = "
+			.. config_value(
+				("\n%s:%%{http_code}\n%s:%%header{retry-after}"):format(status_marker, retry_marker)
+			)
+	)
 	return table.concat(lines, "\n") .. "\n"
 end
 

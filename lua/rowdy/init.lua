@@ -134,6 +134,52 @@ local transport = require("rowdy.transport")
 ---@field message string
 ---@field status? integer
 ---@field details? table
+---@field partial_text? string
+
+---@class RowdyPromptTokenDetails
+---@field cached_tokens? number
+---@field cache_write_tokens? number
+---@field audio_tokens? number
+---@field video_tokens? number
+
+---@class RowdyCompletionTokenDetails
+---@field reasoning_tokens? number
+---@field audio_tokens? number
+---@field image_tokens? number
+
+---@class RowdyCostDetails
+---@field upstream_inference_cost? number
+---@field upstream_inference_prompt_cost? number
+---@field upstream_inference_completions_cost? number
+
+---@class RowdyServerToolUse
+---@field web_search_requests? number
+
+---@class RowdyGenerationUsage
+---@field prompt_tokens? number
+---@field completion_tokens? number
+---@field total_tokens? number
+---@field cost? number
+---@field is_byok? boolean
+---@field prompt_tokens_details? RowdyPromptTokenDetails
+---@field completion_tokens_details? RowdyCompletionTokenDetails
+---@field cost_details? RowdyCostDetails
+---@field server_tool_use? RowdyServerToolUse
+
+---@class RowdyGenerationResult
+---@field text string
+---@field finish_reason? string
+---@field request_id string
+---@field model_id string
+---@field usage? RowdyGenerationUsage
+
+---@class RowdyGenerateOptions
+---@field prompt string
+---@field model string
+---@field provider string
+---@field stream false
+---@field on_complete fun(result: RowdyGenerationResult)
+---@field on_error fun(error: RowdyError)
 
 ---@class RowdyGetModelEndpointsOptions
 ---@field model string
@@ -248,6 +294,14 @@ local option_fields = {
 	on_complete = true,
 	on_error = true,
 }
+local generate_option_fields = {
+	prompt = true,
+	model = true,
+	provider = true,
+	stream = true,
+	on_complete = true,
+	on_error = true,
+}
 local model_option_fields = {
 	limit = true,
 	search = true,
@@ -311,6 +365,35 @@ local model_sorts = {
 	["agentic-high-to-low"] = true,
 	["design-arena-elo-high-to-low"] = true,
 }
+
+local function validate_generate_options(opts)
+	if type(opts) ~= "table" then
+		error("generate: options must be a table", 3)
+	end
+	for field in pairs(opts) do
+		if not generate_option_fields[field] then
+			error(("generate: unknown option %q"):format(tostring(field)), 3)
+		end
+	end
+	if type(opts.prompt) ~= "string" or opts.prompt == "" then
+		error("generate: prompt must be a non-empty string", 3)
+	end
+	if type(opts.model) ~= "string" or not opts.model:match("^[%w][%w._-]*/[%w][%w._:%-]*$") then
+		error("generate: model must be a canonical Model ID", 3)
+	end
+	if type(opts.provider) ~= "string" or not opts.provider:match("^[%w][%w._:/-]*$") then
+		error("generate: provider must be a non-empty Provider slug", 3)
+	end
+	if opts.stream ~= false then
+		error("generate: stream must be false", 3)
+	end
+	if type(opts.on_complete) ~= "function" then
+		error("generate: on_complete must be a function", 3)
+	end
+	if type(opts.on_error) ~= "function" then
+		error("generate: on_error must be a function", 3)
+	end
+end
 
 local function validate_options(opts)
 	if type(opts) ~= "table" then
@@ -958,6 +1041,243 @@ local function decode(payload)
 		table.insert(result.endpoints, decoded_endpoint)
 	end
 	return result
+end
+
+local function decode_gateway_error(value)
+	if type(value) ~= "table" then
+		return nil, "Gateway error must be a table"
+	end
+	if type(value.code) ~= "number" then
+		return nil, 'Gateway error field "code" must be a number'
+	end
+	if type(value.message) ~= "string" or value.message == "" then
+		return nil, 'Gateway error field "message" must be a non-empty string'
+	end
+	local result = { code = value.code, message = value.message }
+	if is_present(value.metadata) then
+		if type(value.metadata) ~= "table" then
+			return nil, 'Gateway error field "metadata" must be a table'
+		end
+		result.metadata = value.metadata
+	end
+	return result
+end
+
+local function decode_generation(payload)
+	if type(payload.id) ~= "string" or payload.id == "" then
+		return nil, "response must contain a request ID"
+	end
+	if type(payload.model) ~= "string" or payload.model == "" then
+		return nil, "response must contain a Model ID"
+	end
+	if
+		type(payload.choices) ~= "table"
+		or not vim.islist(payload.choices)
+		or #payload.choices == 0
+	then
+		return nil, "response must contain at least one generation choice"
+	end
+	local choice = payload.choices[1]
+	if type(choice) ~= "table" then
+		return nil, "first generation choice must be a table"
+	end
+	if is_present(choice.error) then
+		local gateway_error, err = decode_gateway_error(choice.error)
+		if not gateway_error then
+			return nil, "generation choice error could not be decoded: " .. err
+		end
+		return nil,
+			nil,
+			{
+				message = gateway_error.message,
+				details = gateway_error,
+				partial_text = type(choice.text) == "string" and choice.text or nil,
+			}
+	end
+	if type(choice.text) ~= "string" then
+		return nil, "first generation choice must contain text"
+	end
+	local result = {
+		text = choice.text,
+		request_id = payload.id,
+		model_id = payload.model,
+	}
+	if is_present(choice.finish_reason) then
+		if type(choice.finish_reason) ~= "string" then
+			return nil, 'field "finish_reason" must be a string or null'
+		end
+		result.finish_reason = choice.finish_reason
+	end
+	if is_present(payload.usage) then
+		if type(payload.usage) ~= "table" then
+			return nil, 'field "usage" must be a table'
+		end
+		local usage = {}
+		local ok, err = copy_typed_fields(payload.usage, usage, {
+			prompt_tokens = "number",
+			completion_tokens = "number",
+			total_tokens = "number",
+			cost = "number",
+			is_byok = "boolean",
+		})
+		if not ok then
+			return nil, err
+		end
+		for field, field_types in pairs({
+			prompt_tokens_details = {
+				cached_tokens = "number",
+				cache_write_tokens = "number",
+				audio_tokens = "number",
+				video_tokens = "number",
+			},
+			completion_tokens_details = {
+				reasoning_tokens = "number",
+				audio_tokens = "number",
+				image_tokens = "number",
+			},
+			cost_details = {
+				upstream_inference_cost = "number",
+				upstream_inference_prompt_cost = "number",
+				upstream_inference_completions_cost = "number",
+			},
+			server_tool_use = { web_search_requests = "number" },
+		}) do
+			ok, err = copy_typed_object(payload.usage, usage, field, field_types)
+			if not ok then
+				return nil, err
+			end
+		end
+		result.usage = usage
+	end
+	return result
+end
+
+---@param opts RowdyGenerateOptions
+---@return fun()
+function M.generate(opts)
+	validate_generate_options(opts)
+	local settled = false
+	local cancel_transport = function() end
+
+	local function settle(callback, value)
+		if settled then
+			return
+		end
+		settled = true
+		vim.schedule(function()
+			callback(value)
+		end)
+	end
+
+	local api_key = vim.env.OPENROUTER_API_KEY
+	if not api_key or api_key == "" then
+		settle(opts.on_error, {
+			kind = "configuration",
+			message = "OPENROUTER_API_KEY is not set",
+		})
+		return function() end
+	end
+	if api_key:find("[%c]") then
+		settle(opts.on_error, {
+			kind = "configuration",
+			message = "OPENROUTER_API_KEY contains invalid control characters",
+		})
+		return function() end
+	end
+
+	cancel_transport = transport.request({
+		method = "POST",
+		path = "/chat/completions",
+		api_key = api_key,
+		connect_timeout = 10,
+		body = vim.json.encode({
+			prompt = opts.prompt,
+			model = opts.model,
+			provider = {
+				order = { opts.provider },
+				allow_fallbacks = false,
+			},
+			stream = false,
+		}),
+	}, function(transport_error, response)
+		if transport_error then
+			settle(opts.on_error, {
+				kind = "transport",
+				message = transport_error.message or "curl transport failed",
+			})
+			return
+		end
+		if type(response) ~= "table" or type(response.status) ~= "number" then
+			settle(opts.on_error, { kind = "transport", message = "curl returned no response" })
+			return
+		end
+
+		local json_ok, payload = pcall(vim.json.decode, response.body)
+		if json_ok and type(payload) == "table" and is_present(payload.error) then
+			local gateway_error, decode_error = decode_gateway_error(payload.error)
+			if not gateway_error then
+				settle(opts.on_error, {
+					kind = "response_decoding",
+					message = "Gateway response could not be decoded: " .. decode_error,
+					status = response.status,
+				})
+				return
+			end
+			settle(opts.on_error, {
+				kind = "gateway",
+				message = gateway_error.message,
+				status = response.status,
+				details = gateway_error,
+			})
+			return
+		end
+		if response.status < 200 or response.status >= 300 then
+			settle(opts.on_error, {
+				kind = "http",
+				message = ("Gateway returned HTTP status %d"):format(response.status),
+				status = response.status,
+			})
+			return
+		end
+		if not json_ok or type(payload) ~= "table" then
+			settle(opts.on_error, {
+				kind = "response_decoding",
+				message = "Gateway response was not valid JSON",
+				status = response.status,
+			})
+			return
+		end
+		local result, decode_error, generation_error = decode_generation(payload)
+		if generation_error then
+			settle(opts.on_error, {
+				kind = "gateway",
+				message = generation_error.message,
+				status = response.status,
+				details = generation_error.details,
+				partial_text = generation_error.partial_text,
+			})
+			return
+		end
+		if not result then
+			settle(opts.on_error, {
+				kind = "response_decoding",
+				message = "Gateway response could not be decoded: " .. decode_error,
+				status = response.status,
+			})
+			return
+		end
+		settle(opts.on_complete, result)
+	end)
+
+	return function()
+		if not settled then
+			settle(opts.on_error, {
+				kind = "cancellation",
+				message = "Generation Request was cancelled",
+			})
+			cancel_transport()
+		end
+	end
 end
 
 ---@param opts RowdyGetModelsOptions

@@ -16,8 +16,7 @@ esac
 
 for required in \
 	"Authorization: Bearer $OPENROUTER_API_KEY" \
-	'connect-timeout = "10"' \
-	'max-time = "30"'
+	'connect-timeout = "10"'
 do
 	case "$config" in
 		*"$required"*) ;;
@@ -27,6 +26,40 @@ do
 			;;
 	esac
 done
+
+if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
+	for required in \
+		'request = "POST"' \
+		'url = "https://openrouter.ai/api/v1/chat/completions"' \
+		'Content-Type: application/json' \
+		'sensitive prompt not in argv or files' \
+		'deepinfra/turbo' \
+		'allow_fallbacks\":false' \
+		'stream\":false'
+	do
+		case "$config" in
+			*"$required"*) ;;
+			*)
+				printf '%s\n' "missing generation curl config: $required" >&2
+				exit 2
+				;;
+		esac
+	done
+	case "$config" in
+		*'max-time'*)
+			printf '%s\n' "generation unexpectedly had a total timeout" >&2
+			exit 2
+			;;
+	esac
+else
+	case "$config" in
+		*'max-time = "30"'*) ;;
+		*)
+			printf '%s\n' "missing curl config: max-time" >&2
+			exit 2
+			;;
+	esac
+fi
 
 if [ "$ROWDY_CURL_SCENARIO" = "cancel" ]; then
 	printf '%s\n' "$$" > "$ROWDY_CURL_STATE"
@@ -39,6 +72,14 @@ if [ -f "$ROWDY_CURL_STATE" ]; then
 fi
 count=$((count + 1))
 printf '%s\n' "$count" > "$ROWDY_CURL_STATE"
+
+if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
+	printf '%s\n' \
+		'{"id":"gen-secure","model":"openai/gpt-4o-mini","choices":[{"text":"secure","finish_reason":"stop"}]}' \
+		'__ROWDY_HTTP_STATUS__:200' \
+		'__ROWDY_RETRY_AFTER__:'
+	exit 0
+fi
 
 if [ "$ROWDY_CURL_SCENARIO" = "retry" ] && [ "$count" -lt 3 ]; then
 	printf '%s\n' \

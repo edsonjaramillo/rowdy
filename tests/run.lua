@@ -2,6 +2,7 @@ vim.opt.runtimepath:prepend(vim.fn.getcwd())
 package.path = "tests/?.lua;" .. package.path
 
 local tests = {}
+vim.list_extend(tests, require("generate_spec"))
 vim.list_extend(tests, require("model_endpoints_spec"))
 vim.list_extend(tests, require("models_spec"))
 local failures = {}
