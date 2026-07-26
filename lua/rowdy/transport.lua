@@ -8,7 +8,8 @@ local M = {}
 ---@field max_retry_after integer
 
 ---@class RowdyTransportRequest
----@field model string
+---@field model? string
+---@field path? string
 ---@field api_key string
 ---@field connect_timeout integer
 ---@field total_timeout integer
@@ -46,13 +47,13 @@ local function config_value(value)
 end
 
 local function curl_config(request)
+	local path = request.path or ("/models/" .. request.model .. "/endpoints")
 	local lines = {
 		"silent",
 		"show-error",
 		"location",
 		"request = " .. config_value("GET"),
-		"url = "
-			.. config_value("https://openrouter.ai/api/v1/models/" .. request.model .. "/endpoints"),
+		"url = " .. config_value("https://openrouter.ai/api/v1" .. path),
 		"header = " .. config_value("Authorization: Bearer " .. request.api_key),
 		"header = " .. config_value("Accept: application/json"),
 		"connect-timeout = " .. config_value(request.connect_timeout),
