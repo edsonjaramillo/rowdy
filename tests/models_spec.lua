@@ -17,6 +17,286 @@ local function load_rowdy(transport)
 	return require("rowdy")
 end
 
+local function model(id)
+	return {
+		id = id,
+		canonical_slug = id,
+		name = id,
+		created = 1,
+		architecture = {
+			modality = "text->text",
+			input_modalities = { "text" },
+			output_modalities = { "text" },
+		},
+		pricing = { prompt = "0", completion = "0" },
+		top_provider = { is_moderated = false },
+		context_length = vim.NIL,
+		per_request_limits = vim.NIL,
+		default_parameters = vim.NIL,
+		links = { details = "/api/v1/models/" .. id .. "/endpoints" },
+		supported_parameters = {},
+		supported_voices = vim.NIL,
+	}
+end
+
+test("collects every Model page in Gateway order through a partial final page", function()
+	local requests = {}
+	local pages = {
+		{
+			data = { model("author/one"), model("author/two") },
+			links = { next = "/api/v1/models?offset=2&limit=2" },
+		},
+		{
+			data = { model("author/three") },
+			links = { next = vim.NIL },
+		},
+	}
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			table.insert(requests, request)
+			callback(nil, { status = 200, body = vim.json.encode(pages[#requests]) })
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local result
+
+	rowdy.get_models({
+		on_complete = function(value)
+			result = value
+		end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+
+	assert(
+		vim.wait(100, function()
+			return result ~= nil
+		end),
+		"completion callback did not run"
+	)
+	assert_equal(
+		{ "author/one", "author/two", "author/three" },
+		vim.tbl_map(function(item)
+			return item.id
+		end, result)
+	)
+	assert_equal(2, #requests)
+	assert_equal("/models", requests[1].path)
+	assert_equal("/models?offset=2&limit=2", requests[2].path)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("caps accumulated Models and stops requesting pages once the limit is satisfied", function()
+	local requests = {}
+	local pages = {
+		{
+			data = { model("author/one"), model("author/two") },
+			links = { next = "/api/v1/models?offset=2&limit=2" },
+		},
+		{
+			data = { model("author/three"), model("author/four") },
+			links = { next = "/api/v1/models?offset=4&limit=2" },
+		},
+	}
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			table.insert(requests, request)
+			callback(nil, { status = 200, body = vim.json.encode(pages[#requests]) })
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local result
+
+	rowdy.get_models({
+		limit = 3,
+		on_complete = function(value)
+			result = value
+		end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+
+	assert(
+		vim.wait(100, function()
+			return result ~= nil
+		end),
+		"completion callback did not run"
+	)
+	assert_equal(
+		{ "author/one", "author/two", "author/three" },
+		vim.tbl_map(function(item)
+			return item.id
+		end, result)
+	)
+	assert_equal(2, #requests)
+	assert_equal("/models", requests[1].path)
+	assert_equal("/models?offset=2&limit=2", requests[2].path)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("completes after an exact full final Model page", function()
+	local pages = {
+		{
+			data = { model("author/one"), model("author/two") },
+			links = { next = "/api/v1/models?offset=2&limit=2" },
+		},
+		{
+			data = { model("author/three"), model("author/four") },
+			links = { next = vim.NIL },
+		},
+	}
+	local request_count = 0
+	local rowdy = load_rowdy({
+		request = function(_, callback)
+			request_count = request_count + 1
+			callback(nil, { status = 200, body = vim.json.encode(pages[request_count]) })
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local result
+
+	rowdy.get_models({
+		on_complete = function(value)
+			result = value
+		end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+
+	assert(
+		vim.wait(100, function()
+			return result ~= nil
+		end),
+		"completion callback did not run"
+	)
+	assert_equal(
+		{ "author/one", "author/two", "author/three", "author/four" },
+		vim.tbl_map(function(item)
+			return item.id
+		end, result)
+	)
+	assert_equal(2, request_count)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("fails Model discovery atomically when a later page is malformed", function()
+	local request_count = 0
+	local rowdy = load_rowdy({
+		request = function(_, callback)
+			request_count = request_count + 1
+			if request_count == 1 then
+				callback(nil, {
+					status = 200,
+					body = vim.json.encode({
+						data = { model("author/one") },
+						links = { next = "/api/v1/models?offset=1&limit=1" },
+					}),
+				})
+			else
+				callback(nil, { status = 200, body = '{"data":[{"id":"author/two"}]}' })
+			end
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local completions = 0
+	local errors = {}
+
+	rowdy.get_models({
+		on_complete = function()
+			completions = completions + 1
+		end,
+		on_error = function(err)
+			table.insert(errors, err)
+		end,
+	})
+
+	assert(
+		vim.wait(100, function()
+			return #errors > 0
+		end),
+		"error callback did not run"
+	)
+	assert_equal(2, request_count)
+	assert_equal(0, completions)
+	assert_equal(1, #errors)
+	assert_equal("response_decoding", errors[1].kind)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("cancels the active Model page and prevents subsequent pages", function()
+	local requests = {}
+	local callbacks = {}
+	local stop_counts = { 0, 0 }
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			table.insert(requests, request)
+			table.insert(callbacks, callback)
+			local request_index = #requests
+			return function()
+				stop_counts[request_index] = stop_counts[request_index] + 1
+			end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local completions = 0
+	local errors = {}
+
+	local cancel = rowdy.get_models({
+		on_complete = function()
+			completions = completions + 1
+		end,
+		on_error = function(err)
+			table.insert(errors, err)
+		end,
+	})
+	callbacks[1](nil, {
+		status = 200,
+		body = vim.json.encode({
+			data = { model("author/one") },
+			links = { next = "/api/v1/models?offset=1&limit=1" },
+		}),
+	})
+	assert_equal(2, #requests)
+
+	cancel()
+	callbacks[2](nil, {
+		status = 200,
+		body = vim.json.encode({
+			data = { model("author/two") },
+			links = { next = "/api/v1/models?offset=2&limit=1" },
+		}),
+	})
+	assert(
+		vim.wait(100, function()
+			return #errors > 0
+		end),
+		"cancellation callback did not run"
+	)
+	assert_equal(2, #requests)
+	assert_equal({ 0, 1 }, stop_counts)
+	assert_equal(0, completions)
+	assert_equal(1, #errors)
+	assert_equal("cancellation", errors[1].kind)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
 test("discovers an unfiltered typed Model catalog without setup", function()
 	local requests = {}
 	local rowdy = load_rowdy({
@@ -108,6 +388,7 @@ test("discovers an unfiltered typed Model catalog without setup", function()
 							unknown_model_field = true,
 						},
 					},
+					links = { next = vim.NIL },
 					unknown_response_field = true,
 				}),
 			})
@@ -233,7 +514,7 @@ test("encodes documented categorical Model filters without implicit modalities",
 	local rowdy = load_rowdy({
 		request = function(request, callback)
 			table.insert(requests, request)
-			callback(nil, { status = 200, body = '{"data":[]}' })
+			callback(nil, { status = 200, body = '{"data":[],"links":{"next":null}}' })
 			return function() end
 		end,
 	})
@@ -285,7 +566,7 @@ test("encodes documented numeric Model constraints and sorting", function()
 	local rowdy = load_rowdy({
 		request = function(request, callback)
 			table.insert(requests, request)
-			callback(nil, { status = 200, body = '{"data":[]}' })
+			callback(nil, { status = 200, body = '{"data":[],"links":{"next":null}}' })
 			return function() end
 		end,
 	})
@@ -382,6 +663,12 @@ test("rejects malformed numeric Model constraints and inverted ranges", function
 	}
 	local invalid_options = {
 		vim.tbl_extend("force", valid, { sort = "price" }),
+		vim.tbl_extend("force", valid, { limit = 0 }),
+		vim.tbl_extend("force", valid, { limit = -1 }),
+		vim.tbl_extend("force", valid, { limit = 1.5 }),
+		vim.tbl_extend("force", valid, { limit = "1" }),
+		vim.tbl_extend("force", valid, { limit = 0 / 0 }),
+		vim.tbl_extend("force", valid, { limit = math.huge }),
 		vim.tbl_extend("force", valid, { minimum_context_length = 0 }),
 		vim.tbl_extend("force", valid, { minimum_context_length = 1.5 }),
 		vim.tbl_extend("force", valid, { minimum_input_price = "0" }),
@@ -571,6 +858,11 @@ test("reports typed Model discovery failures exactly once", function()
 		{
 			name = "invalid JSON",
 			response = { status = 200, body = "not JSON" },
+			expected = { kind = "response_decoding", status = 200 },
+		},
+		{
+			name = "missing pagination metadata",
+			response = { status = 200, body = '{"data":[]}' },
 			expected = { kind = "response_decoding", status = 200 },
 		},
 		{

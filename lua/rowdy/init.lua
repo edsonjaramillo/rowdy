@@ -141,6 +141,7 @@ local transport = require("rowdy.transport")
 ---@field on_error fun(error: RowdyError)
 
 ---@class RowdyGetModelsOptions
+---@field limit? integer
 ---@field search? string
 ---@field category? 'programming'|'roleplay'|'marketing'|'marketing/seo'|'technology'|'science'|'translation'|'legal'|'finance'|'health'|'trivia'|'academia'
 ---@field supported_parameters? string[]
@@ -248,6 +249,7 @@ local option_fields = {
 	on_error = true,
 }
 local model_option_fields = {
+	limit = true,
 	search = true,
 	category = true,
 	supported_parameters = true,
@@ -344,6 +346,12 @@ local function validate_model_options(opts)
 	end
 	if type(opts.on_error) ~= "function" then
 		error("get_models: on_error must be a function", 3)
+	end
+	if
+		opts.limit ~= nil
+		and (type(opts.limit) ~= "number" or opts.limit % 1 ~= 0 or opts.limit < 1)
+	then
+		error("get_models: limit must be a positive integer", 3)
 	end
 	for _, field in ipairs({ "search", "architecture" }) do
 		local value = opts[field]
@@ -958,6 +966,8 @@ function M.get_models(opts)
 	validate_model_options(opts)
 	local settled = false
 	local cancel_transport = function() end
+	local models = {}
+	local request_number = 0
 
 	local function settle(callback, value)
 		if settled then
@@ -985,67 +995,115 @@ function M.get_models(opts)
 		return function() end
 	end
 
-	cancel_transport = transport.request({
-		path = model_path(opts),
-		api_key = api_key,
-		connect_timeout = 10,
-		total_timeout = 30,
-		retry = {
-			max_attempts = 3,
-			delays = { 250, 1000 },
-			max_retry_after = 5000,
-		},
-	}, function(transport_error, response)
-		if transport_error then
-			settle(opts.on_error, {
-				kind = "transport",
-				message = transport_error.message or "curl transport failed",
-			})
-			return
-		end
-		if type(response) ~= "table" or type(response.status) ~= "number" then
-			settle(opts.on_error, { kind = "transport", message = "curl returned no response" })
-			return
-		end
+	local request_page
+	request_page = function(path)
+		request_number = request_number + 1
+		local this_request = request_number
+		local callback_ran = false
+		local cancel = transport.request({
+			path = path,
+			api_key = api_key,
+			connect_timeout = 10,
+			total_timeout = 30,
+			retry = {
+				max_attempts = 3,
+				delays = { 250, 1000 },
+				max_retry_after = 5000,
+			},
+		}, function(transport_error, response)
+			callback_ran = true
+			if settled then
+				return
+			end
+			if transport_error then
+				settle(opts.on_error, {
+					kind = "transport",
+					message = transport_error.message or "curl transport failed",
+				})
+				return
+			end
+			if type(response) ~= "table" or type(response.status) ~= "number" then
+				settle(opts.on_error, { kind = "transport", message = "curl returned no response" })
+				return
+			end
 
-		local json_ok, payload = pcall(vim.json.decode, response.body)
-		if json_ok and type(payload) == "table" and type(payload.error) == "table" then
-			settle(opts.on_error, {
-				kind = "gateway",
-				message = type(payload.error.message) == "string" and payload.error.message
-					or "Gateway rejected Model discovery",
-				status = response.status,
-				details = payload.error,
-			})
-			return
+			local json_ok, payload = pcall(vim.json.decode, response.body)
+			if json_ok and type(payload) == "table" and type(payload.error) == "table" then
+				settle(opts.on_error, {
+					kind = "gateway",
+					message = type(payload.error.message) == "string" and payload.error.message
+						or "Gateway rejected Model discovery",
+					status = response.status,
+					details = payload.error,
+				})
+				return
+			end
+			if response.status < 200 or response.status >= 300 then
+				settle(opts.on_error, {
+					kind = "http",
+					message = ("Gateway returned HTTP status %d"):format(response.status),
+					status = response.status,
+				})
+				return
+			end
+			if not json_ok or type(payload) ~= "table" then
+				settle(opts.on_error, {
+					kind = "response_decoding",
+					message = "Gateway response was not valid JSON",
+					status = response.status,
+				})
+				return
+			end
+			local page, decode_error = decode_models(payload)
+			if not page then
+				settle(opts.on_error, {
+					kind = "response_decoding",
+					message = "Gateway response could not be decoded: " .. decode_error,
+					status = response.status,
+				})
+				return
+			end
+			local next_page
+			if type(payload.links) ~= "table" then
+				decode_error = 'response field "links" must be a table'
+			elseif payload.links.next ~= vim.NIL then
+				if type(payload.links.next) ~= "string" or payload.links.next == "" then
+					decode_error = 'response field "links.next" must be a URL or null'
+				else
+					next_page = payload.links.next:match("^/api/v1(/models%?.+)$")
+					if not next_page then
+						decode_error = 'response field "links.next" must identify a Models page'
+					end
+				end
+			end
+			if decode_error then
+				settle(opts.on_error, {
+					kind = "response_decoding",
+					message = "Gateway response could not be decoded: " .. decode_error,
+					status = response.status,
+				})
+				return
+			end
+			vim.list_extend(models, page)
+			if opts.limit and #models >= opts.limit then
+				while #models > opts.limit do
+					table.remove(models)
+				end
+				settle(opts.on_complete, models)
+				return
+			end
+			if next_page then
+				request_page(next_page)
+			else
+				settle(opts.on_complete, models)
+			end
+		end)
+		if not callback_ran and not settled and request_number == this_request then
+			cancel_transport = cancel
 		end
-		if response.status < 200 or response.status >= 300 then
-			settle(opts.on_error, {
-				kind = "http",
-				message = ("Gateway returned HTTP status %d"):format(response.status),
-				status = response.status,
-			})
-			return
-		end
-		if not json_ok or type(payload) ~= "table" then
-			settle(opts.on_error, {
-				kind = "response_decoding",
-				message = "Gateway response was not valid JSON",
-				status = response.status,
-			})
-			return
-		end
-		local result, decode_error = decode_models(payload)
-		if not result then
-			settle(opts.on_error, {
-				kind = "response_decoding",
-				message = "Gateway response could not be decoded: " .. decode_error,
-				status = response.status,
-			})
-			return
-		end
-		settle(opts.on_complete, result)
-	end)
+	end
+
+	request_page(model_path(opts))
 
 	return function()
 		if not settled then
