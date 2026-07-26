@@ -141,6 +141,17 @@ local transport = require("rowdy.transport")
 ---@field on_error fun(error: RowdyError)
 
 ---@class RowdyGetModelsOptions
+---@field search? string
+---@field category? 'programming'|'roleplay'|'marketing'|'marketing/seo'|'technology'|'science'|'translation'|'legal'|'finance'|'health'|'trivia'|'academia'
+---@field supported_parameters? string[]
+---@field input_modalities? ('text'|'image'|'audio'|'file')[]
+---@field output_modalities? ('text'|'image'|'audio'|'embeddings'|'all')[]
+---@field architecture? string
+---@field model_authors? string[]
+---@field providers? string[]
+---@field distillable? boolean
+---@field zero_data_retention? true
+---@field region? 'eu'
 ---@field on_complete fun(result: RowdyModel[])
 ---@field on_error fun(error: RowdyError)
 
@@ -221,9 +232,37 @@ local option_fields = {
 	on_error = true,
 }
 local model_option_fields = {
+	search = true,
+	category = true,
+	supported_parameters = true,
+	input_modalities = true,
+	output_modalities = true,
+	architecture = true,
+	model_authors = true,
+	providers = true,
+	distillable = true,
+	zero_data_retention = true,
+	region = true,
 	on_complete = true,
 	on_error = true,
 }
+
+local model_categories = {
+	programming = true,
+	roleplay = true,
+	marketing = true,
+	["marketing/seo"] = true,
+	technology = true,
+	science = true,
+	translation = true,
+	legal = true,
+	finance = true,
+	health = true,
+	trivia = true,
+	academia = true,
+}
+local input_modalities = { text = true, image = true, audio = true, file = true }
+local output_modalities = { text = true, image = true, audio = true, embeddings = true, all = true }
 
 local function validate_options(opts)
 	if type(opts) ~= "table" then
@@ -260,6 +299,109 @@ local function validate_model_options(opts)
 	if type(opts.on_error) ~= "function" then
 		error("get_models: on_error must be a function", 3)
 	end
+	for _, field in ipairs({ "search", "architecture" }) do
+		local value = opts[field]
+		if value ~= nil and (type(value) ~= "string" or value == "" or value:find("[%c]")) then
+			error(
+				("get_models: %s must be a non-empty string without control characters"):format(
+					field
+				),
+				3
+			)
+		end
+	end
+	if opts.category ~= nil and not model_categories[opts.category] then
+		error("get_models: category is not supported", 3)
+	end
+
+	local function validate_list(field, allowed)
+		local value = opts[field]
+		if value == nil then
+			return
+		end
+		if type(value) ~= "table" or not vim.islist(value) or #value == 0 then
+			error(("get_models: %s must be a non-empty list"):format(field), 3)
+		end
+		local seen = {}
+		for _, item in ipairs(value) do
+			if
+				type(item) ~= "string"
+				or item == ""
+				or item:find("[,%c]")
+				or item:match("^%s")
+				or item:match("%s$")
+				or (field ~= "providers" and item:find("%s"))
+			then
+				error(("get_models: %s must contain non-empty comma-free values"):format(field), 3)
+			end
+			if allowed and not allowed[item] then
+				error(("get_models: %s contains an unsupported value %q"):format(field, item), 3)
+			end
+			if seen[item] then
+				error(("get_models: %s must not contain duplicate values"):format(field), 3)
+			end
+			seen[item] = true
+		end
+	end
+
+	validate_list("supported_parameters")
+	validate_list("input_modalities", input_modalities)
+	validate_list("output_modalities", output_modalities)
+	validate_list("model_authors")
+	validate_list("providers")
+	if opts.output_modalities and #opts.output_modalities > 1 then
+		for _, modality in ipairs(opts.output_modalities) do
+			if modality == "all" then
+				error('get_models: output modality "all" cannot be combined with other values', 3)
+			end
+		end
+	end
+	if opts.distillable ~= nil and type(opts.distillable) ~= "boolean" then
+		error("get_models: distillable must be a boolean", 3)
+	end
+	if opts.zero_data_retention ~= nil and opts.zero_data_retention ~= true then
+		error("get_models: zero_data_retention must be true when specified", 3)
+	end
+	if opts.region ~= nil and opts.region ~= "eu" then
+		error('get_models: region must be "eu"', 3)
+	end
+end
+
+local function model_path(opts)
+	local function encode(value)
+		local encoded = tostring(value):gsub("([^%w%-._~])", function(character)
+			return ("%%%02X"):format(character:byte())
+		end)
+		return encoded
+	end
+	local query = {}
+	local function add(name, value)
+		if value ~= nil then
+			table.insert(query, name .. "=" .. encode(value))
+		end
+	end
+	local function add_list(name, values)
+		if values then
+			local encoded = {}
+			for _, value in ipairs(values) do
+				table.insert(encoded, encode(value))
+			end
+			table.insert(query, name .. "=" .. table.concat(encoded, ","))
+		end
+	end
+
+	add("q", opts.search)
+	add("category", opts.category)
+	add_list("supported_parameters", opts.supported_parameters)
+	add_list("input_modalities", opts.input_modalities)
+	add_list("output_modalities", opts.output_modalities)
+	add("arch", opts.architecture)
+	add_list("model_authors", opts.model_authors)
+	add_list("providers", opts.providers)
+	add("distillable", opts.distillable ~= nil and tostring(opts.distillable) or nil)
+	add("zdr", opts.zero_data_retention and "true" or nil)
+	add("region", opts.region)
+	return #query > 0 and "/models?" .. table.concat(query, "&") or "/models"
 end
 
 local function is_present(value)
@@ -721,7 +863,7 @@ function M.get_models(opts)
 	end
 
 	cancel_transport = transport.request({
-		path = "/models",
+		path = model_path(opts),
 		api_key = api_key,
 		connect_timeout = 10,
 		total_timeout = 30,

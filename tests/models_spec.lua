@@ -228,6 +228,58 @@ test("discovers an unfiltered typed Model catalog without setup", function()
 	vim.env.OPENROUTER_API_KEY = previous_key
 end)
 
+test("encodes documented categorical Model filters without implicit modalities", function()
+	local requests = {}
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			table.insert(requests, request)
+			callback(nil, { status = 200, body = '{"data":[]}' })
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+
+	rowdy.get_models({
+		search = "vision models",
+		category = "programming",
+		supported_parameters = { "tools", "response_format" },
+		input_modalities = { "text", "image" },
+		output_modalities = { "text" },
+		architecture = "GPT",
+		model_authors = { "openai", "anthropic" },
+		providers = { "OpenAI", "Together AI" },
+		distillable = false,
+		zero_data_retention = true,
+		region = "eu",
+		on_complete = function() end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+
+	assert_equal(1, #requests)
+	assert_equal(
+		"/models?q=vision%20models&category=programming&supported_parameters=tools,response_format"
+			.. "&input_modalities=text,image&output_modalities=text&arch=GPT"
+			.. "&model_authors=openai,anthropic&providers=OpenAI,Together%20AI"
+			.. "&distillable=false&zdr=true&region=eu",
+		requests[1].path
+	)
+
+	rowdy.get_models({
+		category = "marketing/seo",
+		output_modalities = { "all" },
+		on_complete = function() end,
+		on_error = function(err)
+			error(vim.inspect(err))
+		end,
+	})
+	assert_equal("/models?category=marketing%2Fseo&output_modalities=all", requests[2].path)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
 test("rejects invalid Model discovery options before starting transport", function()
 	local request_count = 0
 	local rowdy = load_rowdy({
@@ -243,7 +295,19 @@ test("rejects invalid Model discovery options before starting transport", functi
 	local missing_error = vim.deepcopy(valid)
 	missing_error.on_error = nil
 	local invalid_options = {
-		vim.tbl_extend("force", valid, { output_modalities = { "text" } }),
+		vim.tbl_extend("force", valid, { unsupported_filter = true }),
+		vim.tbl_extend("force", valid, { search = "" }),
+		vim.tbl_extend("force", valid, { architecture = "GPT\nClaude" }),
+		vim.tbl_extend("force", valid, { category = "chat" }),
+		vim.tbl_extend("force", valid, { supported_parameters = "tools" }),
+		vim.tbl_extend("force", valid, { supported_parameters = {} }),
+		vim.tbl_extend("force", valid, { input_modalities = { "video" } }),
+		vim.tbl_extend("force", valid, { output_modalities = { "all", "text" } }),
+		vim.tbl_extend("force", valid, { model_authors = { "openai,anthropic" } }),
+		vim.tbl_extend("force", valid, { providers = { "OpenAI", 7 } }),
+		vim.tbl_extend("force", valid, { distillable = "true" }),
+		vim.tbl_extend("force", valid, { zero_data_retention = false }),
+		vim.tbl_extend("force", valid, { region = "us" }),
 		vim.tbl_extend("force", valid, { on_complete = "not a callback" }),
 		missing_error,
 	}
