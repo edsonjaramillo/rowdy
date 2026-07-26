@@ -16,6 +16,7 @@ local M = {}
 ---@field total_timeout? integer
 ---@field body? string
 ---@field retry? RowdyRetryOptions
+---@field on_data? fun(data: string)
 
 ---@class RowdyTransportResponse
 ---@field status integer
@@ -57,12 +58,17 @@ local function curl_config(request)
 		"request = " .. config_value(request.method or "GET"),
 		"url = " .. config_value("https://openrouter.ai/api/v1" .. path),
 		"header = " .. config_value("Authorization: Bearer " .. request.api_key),
-		"header = " .. config_value("Accept: application/json"),
+		"header = " .. config_value(
+			request.on_data and "Accept: text/event-stream" or "Accept: application/json"
+		),
 		"connect-timeout = " .. config_value(request.connect_timeout),
 	}
 	if request.body then
 		table.insert(lines, "header = " .. config_value("Content-Type: application/json"))
 		table.insert(lines, "data = " .. config_value(request.body))
+	end
+	if request.on_data then
+		table.insert(lines, "no-buffer")
 	end
 	if request.total_timeout then
 		table.insert(lines, "max-time = " .. config_value(request.total_timeout))
@@ -240,6 +246,9 @@ function M.request(request, callback)
 			end
 			if data then
 				table.insert(output, data)
+				if request.on_data then
+					request.on_data(data)
+				end
 			else
 				stdout_done = true
 				close(stdout)

@@ -27,15 +27,14 @@ do
 	esac
 done
 
-if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
+if [ "$ROWDY_CURL_SCENARIO" = "generate" ] || [ "$ROWDY_CURL_SCENARIO" = "stream" ]; then
 	for required in \
 		'request = "POST"' \
 		'url = "https://openrouter.ai/api/v1/chat/completions"' \
 		'Content-Type: application/json' \
 		'sensitive prompt not in argv or files' \
 		'deepinfra/turbo' \
-		'allow_fallbacks\":false' \
-		'stream\":false'
+		'allow_fallbacks\":false'
 	do
 		case "$config" in
 			*"$required"*) ;;
@@ -45,6 +44,26 @@ if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
 				;;
 		esac
 	done
+	if [ "$ROWDY_CURL_SCENARIO" = "stream" ]; then
+		for required in 'stream\":true' 'Accept: text/event-stream' 'no-buffer'
+		do
+			case "$config" in
+				*"$required"*) ;;
+				*)
+					printf '%s\n' "missing streaming curl config: $required" >&2
+					exit 2
+					;;
+			esac
+		done
+	else
+		case "$config" in
+			*'stream\":false'*) ;;
+			*)
+				printf '%s\n' "non-streaming generation enabled streaming" >&2
+				exit 2
+				;;
+		esac
+	fi
 	case "$config" in
 		*'max-time'*)
 			printf '%s\n' "generation unexpectedly had a total timeout" >&2
@@ -76,6 +95,17 @@ printf '%s\n' "$count" > "$ROWDY_CURL_STATE"
 if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
 	printf '%s\n' \
 		'{"id":"gen-secure","model":"openai/gpt-4o-mini","choices":[{"text":"secure","finish_reason":"stop"}]}' \
+		'__ROWDY_HTTP_STATUS__:200' \
+		'__ROWDY_RETRY_AFTER__:'
+	exit 0
+fi
+
+if [ "$ROWDY_CURL_SCENARIO" = "stream" ]; then
+	printf '%s\n' \
+		'data: {"id":"gen-secure","model":"openai/gpt-4o-mini","choices":[{"delta":{"content":"secure"},"finish_reason":"stop"}]}' \
+		'' \
+		'data: [DONE]' \
+		'' \
 		'__ROWDY_HTTP_STATUS__:200' \
 		'__ROWDY_RETRY_AFTER__:'
 	exit 0

@@ -130,7 +130,7 @@ local transport = require("rowdy.transport")
 ---@field supported_voices? string[]
 
 ---@class RowdyError
----@field kind 'configuration'|'cancellation'|'transport'|'http'|'gateway'|'response_decoding'
+---@field kind 'configuration'|'cancellation'|'transport'|'http'|'gateway'|'response_decoding'|'stream_parsing'
 ---@field message string
 ---@field status? integer
 ---@field details? table
@@ -177,7 +177,8 @@ local transport = require("rowdy.transport")
 ---@field prompt string
 ---@field model string
 ---@field provider string
----@field stream false
+---@field stream? boolean
+---@field on_chunk? fun(chunk: string)
 ---@field on_complete fun(result: RowdyGenerationResult)
 ---@field on_error fun(error: RowdyError)
 
@@ -299,6 +300,7 @@ local generate_option_fields = {
 	model = true,
 	provider = true,
 	stream = true,
+	on_chunk = true,
 	on_complete = true,
 	on_error = true,
 }
@@ -384,8 +386,14 @@ local function validate_generate_options(opts)
 	if type(opts.provider) ~= "string" or not opts.provider:match("^[%w][%w._:/-]*$") then
 		error("generate: provider must be a non-empty Provider slug", 3)
 	end
-	if opts.stream ~= false then
-		error("generate: stream must be false", 3)
+	if opts.stream ~= nil and type(opts.stream) ~= "boolean" then
+		error("generate: stream must be a boolean", 3)
+	end
+	if opts.on_chunk ~= nil and type(opts.on_chunk) ~= "function" then
+		error("generate: on_chunk must be a function", 3)
+	end
+	if opts.stream == false and opts.on_chunk ~= nil then
+		error("generate: on_chunk requires streaming", 3)
 	end
 	if type(opts.on_complete) ~= "function" then
 		error("generate: on_complete must be a function", 3)
@@ -1063,6 +1071,48 @@ local function decode_gateway_error(value)
 	return result
 end
 
+local function decode_generation_usage(value)
+	if type(value) ~= "table" then
+		return nil, 'field "usage" must be a table'
+	end
+	local usage = {}
+	local ok, err = copy_typed_fields(value, usage, {
+		prompt_tokens = "number",
+		completion_tokens = "number",
+		total_tokens = "number",
+		cost = "number",
+		is_byok = "boolean",
+	})
+	if not ok then
+		return nil, err
+	end
+	for field, field_types in pairs({
+		prompt_tokens_details = {
+			cached_tokens = "number",
+			cache_write_tokens = "number",
+			audio_tokens = "number",
+			video_tokens = "number",
+		},
+		completion_tokens_details = {
+			reasoning_tokens = "number",
+			audio_tokens = "number",
+			image_tokens = "number",
+		},
+		cost_details = {
+			upstream_inference_cost = "number",
+			upstream_inference_prompt_cost = "number",
+			upstream_inference_completions_cost = "number",
+		},
+		server_tool_use = { web_search_requests = "number" },
+	}) do
+		ok, err = copy_typed_object(value, usage, field, field_types)
+		if not ok then
+			return nil, err
+		end
+	end
+	return usage
+end
+
 local function decode_generation(payload)
 	if type(payload.id) ~= "string" or payload.id == "" then
 		return nil, "response must contain a request ID"
@@ -1109,43 +1159,9 @@ local function decode_generation(payload)
 		result.finish_reason = choice.finish_reason
 	end
 	if is_present(payload.usage) then
-		if type(payload.usage) ~= "table" then
-			return nil, 'field "usage" must be a table'
-		end
-		local usage = {}
-		local ok, err = copy_typed_fields(payload.usage, usage, {
-			prompt_tokens = "number",
-			completion_tokens = "number",
-			total_tokens = "number",
-			cost = "number",
-			is_byok = "boolean",
-		})
-		if not ok then
+		local usage, err = decode_generation_usage(payload.usage)
+		if not usage then
 			return nil, err
-		end
-		for field, field_types in pairs({
-			prompt_tokens_details = {
-				cached_tokens = "number",
-				cache_write_tokens = "number",
-				audio_tokens = "number",
-				video_tokens = "number",
-			},
-			completion_tokens_details = {
-				reasoning_tokens = "number",
-				audio_tokens = "number",
-				image_tokens = "number",
-			},
-			cost_details = {
-				upstream_inference_cost = "number",
-				upstream_inference_prompt_cost = "number",
-				upstream_inference_completions_cost = "number",
-			},
-			server_tool_use = { web_search_requests = "number" },
-		}) do
-			ok, err = copy_typed_object(payload.usage, usage, field, field_types)
-			if not ok then
-				return nil, err
-			end
 		end
 		result.usage = usage
 	end
@@ -1158,15 +1174,189 @@ function M.generate(opts)
 	validate_generate_options(opts)
 	local settled = false
 	local cancel_transport = function() end
+	local streaming = opts.stream ~= false
+	local stream_buffer = ""
+	local event_data = {}
+	local stream_done = false
+	local generated_text = ""
+	local partial_text = ""
+	local stream_result = {}
+	local chunks_active = true
 
 	local function settle(callback, value)
 		if settled then
 			return
 		end
+		if value.kind ~= nil then
+			chunks_active = false
+			local accumulated_text = value.kind == "cancellation" and partial_text or generated_text
+			if streaming and accumulated_text ~= "" then
+				value.partial_text = accumulated_text
+			end
+		end
 		settled = true
 		vim.schedule(function()
 			callback(value)
 		end)
+	end
+
+	local function stream_error(message, gateway_error)
+		local err = {
+			kind = gateway_error and "gateway" or "stream_parsing",
+			message = message,
+			partial_text = partial_text ~= "" and partial_text or nil,
+		}
+		if gateway_error then
+			err.status = gateway_error.code
+			err.details = gateway_error
+		end
+		settle(opts.on_error, err)
+		cancel_transport()
+	end
+
+	local function merge_usage(usage)
+		stream_result.usage = vim.tbl_deep_extend("force", stream_result.usage or {}, usage)
+	end
+
+	local function decode_stream_event(data)
+		if data == "[DONE]" then
+			stream_done = true
+			stream_buffer = ""
+			event_data = {}
+			return
+		end
+		local ok, payload = pcall(vim.json.decode, data)
+		if not ok or type(payload) ~= "table" then
+			stream_error("Gateway stream contained invalid JSON")
+			return
+		end
+		if is_present(payload.error) then
+			local gateway_error, err = decode_gateway_error(payload.error)
+			if not gateway_error then
+				stream_error("Gateway stream error could not be decoded: " .. err)
+				return
+			end
+			stream_error(gateway_error.message, gateway_error)
+			return
+		end
+		for _, target in ipairs({
+			{ payload.id, "request_id", "request ID" },
+			{ payload.model, "model_id", "Model ID" },
+		}) do
+			local value = target[1]
+			if is_present(value) then
+				if type(value) ~= "string" or value == "" then
+					stream_error("Gateway stream " .. target[3] .. " must be a non-empty string")
+					return
+				end
+				stream_result[target[2]] = value
+			end
+		end
+		if is_present(payload.usage) then
+			local usage, err = decode_generation_usage(payload.usage)
+			if not usage then
+				stream_error("Gateway stream could not decode usage: " .. err)
+				return
+			end
+			merge_usage(usage)
+		end
+		if not is_present(payload.choices) then
+			return
+		end
+		if type(payload.choices) ~= "table" or not vim.islist(payload.choices) then
+			stream_error("Gateway stream choices must be a list")
+			return
+		end
+		if #payload.choices == 0 then
+			return
+		end
+		local choice = payload.choices[1]
+		if type(choice) ~= "table" then
+			stream_error("Gateway stream choice must be a table")
+			return
+		end
+		if is_present(choice.error) then
+			local gateway_error, err = decode_gateway_error(choice.error)
+			if not gateway_error then
+				stream_error("Gateway stream choice error could not be decoded: " .. err)
+				return
+			end
+			stream_error(gateway_error.message, gateway_error)
+			return
+		end
+		if is_present(choice.finish_reason) then
+			if type(choice.finish_reason) ~= "string" then
+				stream_error('Gateway stream field "finish_reason" must be a string or null')
+				return
+			end
+			stream_result.finish_reason = choice.finish_reason
+		end
+		if not is_present(choice.delta) then
+			return
+		end
+		if type(choice.delta) ~= "table" then
+			stream_error("Gateway stream choice delta must be a table")
+			return
+		end
+		local content = choice.delta.content
+		if not is_present(content) then
+			return
+		end
+		if type(content) ~= "string" then
+			stream_error("Gateway stream text delta must be a string")
+			return
+		end
+		if content ~= "" then
+			generated_text = generated_text .. content
+			if opts.on_chunk then
+				vim.schedule(function()
+					if not chunks_active then
+						return
+					end
+					partial_text = partial_text .. content
+					opts.on_chunk(content)
+				end)
+			else
+				partial_text = generated_text
+			end
+		end
+	end
+
+	local function receive_stream_data(data)
+		if settled or stream_done then
+			return
+		end
+		stream_buffer = stream_buffer .. data
+		while true do
+			local newline = stream_buffer:find("[\r\n]")
+			if
+				not newline
+				or (newline == #stream_buffer and stream_buffer:sub(newline, newline) == "\r")
+			then
+				return
+			end
+			local delimiter_length = stream_buffer:sub(newline, newline + 1) == "\r\n" and 2 or 1
+			local line = stream_buffer:sub(1, newline - 1)
+			stream_buffer = stream_buffer:sub(newline + delimiter_length)
+			if line == "" then
+				if #event_data > 0 then
+					local data_lines = table.concat(event_data, "\n")
+					event_data = {}
+					decode_stream_event(data_lines)
+					if settled or stream_done then
+						return
+					end
+				end
+			elseif line:sub(1, 1) ~= ":" then
+				local field, value = line:match("^([^:]+): ?(.*)$")
+				if not field then
+					field, value = line, ""
+				end
+				if field == "data" then
+					table.insert(event_data, value)
+				end
+			end
+		end
 	end
 
 	local api_key = vim.env.OPENROUTER_API_KEY
@@ -1185,7 +1375,7 @@ function M.generate(opts)
 		return function() end
 	end
 
-	cancel_transport = transport.request({
+	local request = {
 		method = "POST",
 		path = "/chat/completions",
 		api_key = api_key,
@@ -1197,13 +1387,21 @@ function M.generate(opts)
 				order = { opts.provider },
 				allow_fallbacks = false,
 			},
-			stream = false,
+			stream = streaming,
 		}),
-	}, function(transport_error, response)
+	}
+	if streaming then
+		request.on_data = receive_stream_data
+	end
+	cancel_transport = transport.request(request, function(transport_error, response)
+		if settled then
+			return
+		end
 		if transport_error then
 			settle(opts.on_error, {
 				kind = "transport",
 				message = transport_error.message or "curl transport failed",
+				partial_text = partial_text ~= "" and partial_text or nil,
 			})
 			return
 		end
@@ -1237,6 +1435,26 @@ function M.generate(opts)
 				message = ("Gateway returned HTTP status %d"):format(response.status),
 				status = response.status,
 			})
+			return
+		end
+		if streaming then
+			if stream_buffer:sub(-1) == "\r" then
+				receive_stream_data("\n")
+			end
+			if stream_buffer ~= "" or #event_data > 0 then
+				stream_error("Gateway stream ended with incomplete event framing")
+				return
+			end
+			if not stream_done then
+				stream_error("Gateway stream ended without a terminal marker")
+				return
+			end
+			if not stream_result.request_id or not stream_result.model_id then
+				stream_error("Gateway stream did not contain request and Model identifiers")
+				return
+			end
+			stream_result.text = generated_text
+			settle(opts.on_complete, stream_result)
 			return
 		end
 		if not json_ok or type(payload) ~= "table" then
@@ -1274,6 +1492,7 @@ function M.generate(opts)
 			settle(opts.on_error, {
 				kind = "cancellation",
 				message = "Generation Request was cancelled",
+				partial_text = partial_text ~= "" and partial_text or nil,
 			})
 			cancel_transport()
 		end
