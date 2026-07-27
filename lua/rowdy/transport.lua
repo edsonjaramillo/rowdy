@@ -42,6 +42,22 @@ local months = {
 	Nov = 11,
 	Dec = 12,
 }
+local weekdays = {
+	Mon = true,
+	Tue = true,
+	Wed = true,
+	Thu = true,
+	Fri = true,
+	Sat = true,
+	Sun = true,
+	Monday = true,
+	Tuesday = true,
+	Wednesday = true,
+	Thursday = true,
+	Friday = true,
+	Saturday = true,
+	Sunday = true,
+}
 
 local function config_value(value)
 	return '"'
@@ -106,9 +122,27 @@ local function should_retry(response)
 end
 
 local function http_date_delay(value)
-	local day, month, year, hour, minute, second =
-		value:match("^%a%a%a, (%d%d) (%a%a%a) (%d%d%d%d) (%d%d):(%d%d):(%d%d) GMT$")
-	if not day or not months[month] then
+	local short_year = false
+	local weekday, day, month, year, hour, minute, second =
+		value:match("^(%a%a%a), (%d%d) (%a%a%a) (%d%d%d%d) (%d%d):(%d%d):(%d%d) GMT$")
+	if not day then
+		weekday, day, month, year, hour, minute, second =
+			value:match("^(%a+), (%d%d)%-(%a%a%a)%-(%d%d) (%d%d):(%d%d):(%d%d) GMT$")
+		if year then
+			local current_year = tonumber(os.date("!%Y"))
+			year = math.floor(current_year / 100) * 100 + tonumber(year)
+			short_year = true
+		end
+	end
+	if not day then
+		weekday, month, day, hour, minute, second, year =
+			value:match("^(%a%a%a) (%a%a%a) (%d%d) (%d%d):(%d%d):(%d%d) (%d%d%d%d)$")
+	end
+	if not day then
+		weekday, month, day, hour, minute, second, year =
+			value:match("^(%a%a%a) (%a%a%a)  (%d) (%d%d):(%d%d):(%d%d) (%d%d%d%d)$")
+	end
+	if not day or not weekdays[weekday] or not months[month] then
 		return nil
 	end
 	local year_number = assert(tonumber(year))
@@ -116,9 +150,43 @@ local function http_date_delay(value)
 	local hour_number = assert(tonumber(hour))
 	local minute_number = assert(tonumber(minute))
 	local second_number = assert(tonumber(second))
+	local month_number = months[month]
+	if short_year then
+		local current = os.date("!*t")
+		local candidate = ("%04d%02d%02d%02d%02d%02d"):format(
+			year_number,
+			month_number,
+			day_number,
+			hour_number,
+			minute_number,
+			second_number
+		)
+		local boundary = ("%04d%02d%02d%02d%02d%02d"):format(
+			current.year + 50,
+			current.month,
+			current.day,
+			current.hour,
+			current.min,
+			current.sec
+		)
+		if candidate > boundary then
+			year_number = year_number - 100
+		end
+	end
+	local leap_year = year_number % 4 == 0 and (year_number % 100 ~= 0 or year_number % 400 == 0)
+	local days_in_month = ({ 31, leap_year and 29 or 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 })[month_number]
+	if
+		day_number < 1
+		or day_number > days_in_month
+		or hour_number > 23
+		or minute_number > 59
+		or second_number > 59
+	then
+		return nil
+	end
 	local local_epoch = os.time({
 		year = year_number,
-		month = months[month],
+		month = month_number,
 		day = day_number,
 		hour = hour_number,
 		min = minute_number,
@@ -139,8 +207,8 @@ end
 
 local function retry_delay(request, attempt, retry_after)
 	if retry_after then
-		local seconds = tonumber(retry_after)
-		if seconds and seconds >= 0 then
+		local seconds = retry_after:match("^%d+$") and tonumber(retry_after)
+		if seconds then
 			return math.min(math.floor(seconds * 1000), request.retry.max_retry_after)
 		end
 		local date_delay = http_date_delay(retry_after)

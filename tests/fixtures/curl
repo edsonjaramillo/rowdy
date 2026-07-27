@@ -158,6 +158,14 @@ if [ "$ROWDY_CURL_SCENARIO" = "backoff" ]; then
 	exit 0
 fi
 
+if [ "$ROWDY_CURL_SCENARIO" = "outcomes" ] && [ "$ROWDY_CURL_DISCOVERY" = "models" ]; then
+	printf '%s\n' \
+		'{"data":[],"links":{"next":null}}' \
+		'__ROWDY_HTTP_STATUS__:200' \
+		'__ROWDY_RETRY_AFTER__:'
+	exit 0
+fi
+
 printf '%s\n' \
 	'{"data":{"id":"openai/gpt-4o-mini","endpoints":[{"tag":"openai"}]}}' \
 	'__ROWDY_HTTP_STATUS__:200' \

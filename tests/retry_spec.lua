@@ -18,7 +18,7 @@ local function read_attempts(path)
 	return tonumber(vim.fn.readfile(path)[1])
 end
 
-local function start_discovery(outcomes, retry_after)
+local function start_discovery(outcomes, retry_after, discovery)
 	local real_uv = vim.uv
 	local timers = {}
 	local controlled_uv = setmetatable({}, { __index = real_uv })
@@ -47,6 +47,7 @@ local function start_discovery(outcomes, retry_after)
 		"OPENROUTER_API_KEY",
 		"ROWDY_CURL_SCENARIO",
 		"ROWDY_CURL_OUTCOMES",
+		"ROWDY_CURL_DISCOVERY",
 		"ROWDY_CURL_STATE",
 		"ROWDY_RETRY_AFTER",
 	}) do
@@ -57,6 +58,7 @@ local function start_discovery(outcomes, retry_after)
 	vim.env.OPENROUTER_API_KEY = "secret"
 	vim.env.ROWDY_CURL_SCENARIO = "outcomes"
 	vim.env.ROWDY_CURL_OUTCOMES = outcomes
+	vim.env.ROWDY_CURL_DISCOVERY = discovery
 	vim.env.ROWDY_CURL_STATE = state
 	vim.env.ROWDY_RETRY_AFTER = retry_after
 	vim.uv = controlled_uv
@@ -67,15 +69,21 @@ local function start_discovery(outcomes, retry_after)
 
 	local result
 	local errors = {}
-	local cancel = rowdy.get_model_endpoints({
-		model = "openai/gpt-4o-mini",
+	local options = {
 		on_complete = function(value)
 			result = value
 		end,
 		on_error = function(err)
 			table.insert(errors, err)
 		end,
-	})
+	}
+	local cancel
+	if discovery == "models" then
+		cancel = rowdy.get_models(options)
+	else
+		options.model = "openai/gpt-4o-mini"
+		cancel = rowdy.get_model_endpoints(options)
+	end
 
 	local operation = {}
 	function operation:wait_for_attempt(count)
@@ -127,8 +135,8 @@ local function start_discovery(outcomes, retry_after)
 	return operation
 end
 
-local function with_discovery(outcomes, retry_after, run)
-	local operation = start_discovery(outcomes, retry_after)
+local function with_discovery(outcomes, retry_after, run, discovery)
+	local operation = start_discovery(outcomes, retry_after, discovery)
 	local ok, err = xpcall(function()
 		run(operation)
 	end, debug.traceback)
@@ -199,6 +207,46 @@ test("caps numeric Retry-After guidance at five seconds", function()
 		operation:wait_until_settled()
 		assert(operation.result() ~= nil, "discovery did not recover after Retry-After")
 	end)
+end)
+
+test("ignores malformed Retry-After guidance", function()
+	for _, retry_after in ipairs({ "1.5", "Fri Nov   6 08:49:37 2099" }) do
+		with_discovery("429 200", retry_after, function(operation)
+			operation:wait_for_attempt(1)
+			operation:wait_for_retry(1)
+			assert_equal(250, operation.timers[1].delay)
+			operation:advance_retry(1)
+			operation:wait_for_attempt(2)
+			operation:wait_until_settled()
+		end)
+	end
+end)
+
+test("accepts obsolete HTTP-date Retry-After guidance", function()
+	for _, retry_after in ipairs({
+		"Friday, 06-Nov-49 08:49:37 GMT",
+		"Fri Nov  6 08:49:37 2099",
+	}) do
+		with_discovery("429 200", retry_after, function(operation)
+			operation:wait_for_attempt(1)
+			operation:wait_for_retry(1)
+			assert_equal(5000, operation.timers[1].delay)
+			operation:advance_retry(1)
+			operation:wait_for_attempt(2)
+			operation:wait_until_settled()
+		end)
+	end
+end)
+
+test("retries Model discovery failures", function()
+	with_discovery("503 200", nil, function(operation)
+		operation:wait_for_attempt(1)
+		operation:advance_retry(1)
+		operation:wait_for_attempt(2)
+		operation:wait_until_settled()
+		assert_equal({}, operation.result())
+		assert_equal(0, #operation.errors)
+	end, "models")
 end)
 
 test("cancels during retry backoff without another attempt", function()
