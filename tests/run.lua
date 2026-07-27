@@ -5,6 +5,7 @@ local tests = {}
 vim.list_extend(tests, require("generate_spec"))
 vim.list_extend(tests, require("model_endpoints_spec"))
 vim.list_extend(tests, require("models_spec"))
+vim.list_extend(tests, require("retry_spec"))
 local failures = {}
 
 for _, test in ipairs(tests) do

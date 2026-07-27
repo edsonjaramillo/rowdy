@@ -96,8 +96,13 @@ local function parse_response(output)
 	}
 end
 
-local function should_retry(status)
-	return status == 408 or status == 429 or status >= 500
+local function should_retry(response)
+	local status = response.status
+	if status ~= 408 and status ~= 429 and (status < 500 or status >= 600) then
+		return false
+	end
+	local ok, payload = pcall(vim.json.decode, response.body)
+	return not (ok and type(payload) == "table" and type(payload.error) == "table")
 end
 
 local function http_date_delay(value)
@@ -174,7 +179,7 @@ function M.request(request, callback)
 		if not active then
 			return
 		end
-		local retryable = err ~= nil or (response ~= nil and should_retry(response.status))
+		local retryable = err ~= nil or (response ~= nil and should_retry(response))
 		if retryable and request.retry and attempt < request.retry.max_attempts then
 			local delay = retry_delay(request, attempt, response and response.retry_after)
 			timer = uv.new_timer()

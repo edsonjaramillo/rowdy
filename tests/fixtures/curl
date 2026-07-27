@@ -111,9 +111,40 @@ if [ "$ROWDY_CURL_SCENARIO" = "stream" ]; then
 	exit 0
 fi
 
+if [ "$ROWDY_CURL_SCENARIO" = "outcomes" ]; then
+	outcome=200
+	index=1
+	for candidate in $ROWDY_CURL_OUTCOMES
+	do
+		if [ "$index" -eq "$count" ]; then
+			outcome=$candidate
+			break
+		fi
+		index=$((index + 1))
+	done
+	if [ "$outcome" = "transport" ]; then
+		printf '%s\n' 'controlled transport failure' >&2
+		exit 6
+	fi
+	if [ "$outcome" = "gateway" ]; then
+		printf '%s\n' \
+			'{"error":{"code":503,"message":"Gateway application failure"}}' \
+			'__ROWDY_HTTP_STATUS__:503' \
+			'__ROWDY_RETRY_AFTER__:'
+		exit 0
+	fi
+	if [ "$outcome" != "200" ]; then
+		printf '%s\n' \
+			'{"temporary":true}' \
+			"__ROWDY_HTTP_STATUS__:$outcome" \
+			"__ROWDY_RETRY_AFTER__:$ROWDY_RETRY_AFTER"
+		exit 0
+	fi
+fi
+
 if [ "$ROWDY_CURL_SCENARIO" = "retry" ] && [ "$count" -lt 3 ]; then
 	printf '%s\n' \
-		'{"error":{"message":"temporarily unavailable"}}' \
+		'{"temporary":true}' \
 		'__ROWDY_HTTP_STATUS__:503' \
 		'__ROWDY_RETRY_AFTER__:'
 	exit 0
@@ -121,7 +152,7 @@ fi
 
 if [ "$ROWDY_CURL_SCENARIO" = "backoff" ]; then
 	printf '%s\n' \
-		'{"error":{"message":"temporarily unavailable"}}' \
+		'{"temporary":true}' \
 		'__ROWDY_HTTP_STATUS__:503' \
 		"__ROWDY_RETRY_AFTER__:$ROWDY_RETRY_AFTER"
 	exit 0
