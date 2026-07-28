@@ -1141,14 +1141,23 @@ local function decode_generation(payload)
 			{
 				message = gateway_error.message,
 				details = gateway_error,
-				partial_text = type(choice.text) == "string" and choice.text or nil,
+				partial_text = type(choice.message) == "table"
+						and type(choice.message.content) == "string"
+						and choice.message.content
+					or nil,
 			}
 	end
-	if type(choice.text) ~= "string" then
-		return nil, "first generation choice must contain text"
+	if type(choice.message) ~= "table" then
+		return nil, "first generation choice must contain a message"
+	end
+	if choice.message.content == nil then
+		return nil, "first generation message must contain content"
+	end
+	if choice.message.content ~= vim.NIL and type(choice.message.content) ~= "string" then
+		return nil, 'first generation message field "content" must be a string or null'
 	end
 	local result = {
-		text = choice.text,
+		text = choice.message.content == vim.NIL and "" or choice.message.content,
 		request_id = payload.id,
 		model_id = payload.model,
 	}
@@ -1291,15 +1300,12 @@ function M.generate(opts)
 			end
 			stream_result.finish_reason = choice.finish_reason
 		end
-		if not is_present(choice.delta) then
-			return
-		end
 		if type(choice.delta) ~= "table" then
 			stream_error("Gateway stream choice delta must be a table")
 			return
 		end
 		local content = choice.delta.content
-		if not is_present(content) then
+		if content == nil or content == vim.NIL then
 			return
 		end
 		if type(content) ~= "string" then
@@ -1381,12 +1387,13 @@ function M.generate(opts)
 		api_key = api_key,
 		connect_timeout = 10,
 		body = vim.json.encode({
-			prompt = opts.prompt,
+			messages = { { role = "user", content = opts.prompt } },
 			model = opts.model,
 			provider = {
 				order = { opts.provider },
 				allow_fallbacks = false,
 			},
+			reasoning = { exclude = true },
 			stream = streaming,
 		}),
 	}

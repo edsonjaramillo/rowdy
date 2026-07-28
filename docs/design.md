@@ -25,13 +25,15 @@ A Generation Request requires:
 - One non-empty Provider slug
 - Completion and error callbacks
 
+Rowdy represents the Prompt to the Gateway as one user message. It requests that separate Model reasoning content be excluded from the response without disabling Model reasoning.
+
 The Provider slug may identify a base Provider or a specific endpoint variant or region. Rowdy sends it as the only preferred Provider and disables Gateway fallbacks. It does not preflight Model and Provider compatibility; incompatibility is a Gateway error.
 
 Streaming defaults to enabled and may be disabled per request. The first version exposes no model-tuning parameters and relies on Gateway and Model defaults.
 
-For a streaming request, the optional chunk callback receives only ordered, non-empty text deltas. SSE comments and metadata-only events remain internal. On success, the final generated text equals the concatenated deltas.
+For a streaming request, the optional chunk callback receives only ordered, non-empty final-content deltas. SSE comments, reasoning deltas, and metadata-only events remain internal. On success, the final Generated Text equals the concatenated final-content deltas and may be empty.
 
-The completion callback receives a typed result containing the final text, finish reason, request and Model identifiers, and available usage and cost metadata. If a stream fails after emitting text, only the error callback runs, and its typed error includes the accumulated partial text.
+The completion callback receives a typed result containing the Generated Text, finish reason, request and Model identifiers, and available usage and cost metadata. Generated Text excludes separate reasoning content. If a stream fails after emitting text, only the error callback runs, and its typed error includes the accumulated partial text.
 
 Generation Requests are never retried automatically.
 

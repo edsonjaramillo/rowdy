@@ -94,7 +94,7 @@ printf '%s\n' "$count" > "$ROWDY_CURL_STATE"
 
 if [ "$ROWDY_CURL_SCENARIO" = "generate" ]; then
 	printf '%s\n' \
-		'{"id":"gen-secure","model":"openai/gpt-4o-mini","choices":[{"text":"secure","finish_reason":"stop"}]}' \
+		'{"id":"gen-secure","model":"openai/gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"secure"},"finish_reason":"stop"}]}' \
 		'__ROWDY_HTTP_STATUS__:200' \
 		'__ROWDY_RETRY_AFTER__:'
 	exit 0

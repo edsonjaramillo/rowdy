@@ -27,3 +27,7 @@ _Avoid_: Query, completion
 **Prompt**:
 The single text input supplied to a Generation Request.
 _Avoid_: Conversation, message history
+
+**Generated Text**:
+The Gateway-normalized final text produced by a Generation Request. It may be empty and excludes separate Model reasoning content.
+_Avoid_: Raw output, reasoning

@@ -46,6 +46,7 @@ test("streams ordered text deltas by default and completes with their metadata",
 			local stream = table.concat({
 				": keepalive\r\n\r\n",
 				'data: {"id":"gen-stream","model":"author/model-v2","choices":[{"delta":{"content":""},"finish_reason":null}]}\r\r',
+				'data: {"id":"gen-stream","model":"author/model-v2","choices":[{"delta":{"reasoning":"internal analysis"},"finish_reason":null}]}\r\n\r\n',
 				'data: {"id":"gen-stream","model":"author/model-v2","choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\r\n\r\n',
 				'data: {"id":"gen-stream","model":"author/model-v2","choices":[{"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":3}}\r\n\r\n',
 				'data: {"id":"gen-stream","model":"author/model-v2","choices":[{"delta":{"content":" world"},"finish_reason":"stop"}],"usage":{"completion_tokens":2,"total_tokens":5,"cost":0.00002}}\r\n\r\n',
@@ -342,7 +343,11 @@ test("generates final text through exactly one Provider without setup", function
 					model = "openai/gpt-4o-mini-2024-07-18",
 					choices = {
 						{
-							text = "Routing is explicit.",
+							message = {
+								role = "assistant",
+								content = "Routing is explicit.",
+								reasoning = "internal analysis",
+							},
 							finish_reason = "stop",
 							native_finish_reason = "stop",
 							unknown_choice_field = true,
@@ -421,8 +426,9 @@ test("generates final text through exactly one Provider without setup", function
 		connect_timeout = 10,
 		body = vim.json.encode({
 			model = "openai/gpt-4o-mini",
-			prompt = "Explain explicit routing.",
+			messages = { { role = "user", content = "Explain explicit routing." } },
 			provider = { order = { "openai" }, allow_fallbacks = false },
+			reasoning = { exclude = true },
 			stream = false,
 		}),
 	}, requests[1])
@@ -438,7 +444,7 @@ test("passes base and endpoint Provider slugs directly to the Gateway", function
 			table.insert(providers, vim.json.decode(request.body).provider.order[1])
 			callback(nil, {
 				status = 200,
-				body = '{"id":"gen-1","model":"author/model","choices":[{"text":"ok","finish_reason":"stop"}]}',
+				body = '{"id":"gen-1","model":"author/model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}',
 			})
 			return function() end
 		end,
@@ -459,7 +465,7 @@ test("tolerates absent optional generation metadata", function()
 		request = function(_, callback)
 			callback(nil, {
 				status = 200,
-				body = '{"id":"gen-1","model":"author/model","choices":[{"text":"ok","finish_reason":null}]}',
+				body = '{"id":"gen-1","model":"author/model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
 			})
 			return function() end
 		end,
@@ -480,6 +486,60 @@ test("tolerates absent optional generation metadata", function()
 		"completion callback did not run"
 	)
 	assert_equal({ text = "ok", request_id = "gen-1", model_id = "author/model" }, result)
+
+	vim.env.OPENROUTER_API_KEY = previous_key
+end)
+
+test("allows empty Generated Text in chat responses and streams", function()
+	local response_index = 0
+	local rowdy = load_rowdy({
+		request = function(request, callback)
+			response_index = response_index + 1
+			if request.on_data then
+				request.on_data(
+					sse(
+						'{"id":"gen-stream","model":"author/model","choices":[{"delta":{"reasoning":"internal analysis","content":null},"finish_reason":"stop"}]}'
+					) .. sse("[DONE]")
+				)
+				callback(nil, { status = 200, body = "" })
+			else
+				callback(nil, {
+					status = 200,
+					body = '{"id":"gen-static","model":"author/model","choices":[{"message":{"role":"assistant","content":null,"reasoning":"internal analysis"},"finish_reason":"stop"}]}',
+				})
+			end
+			return function() end
+		end,
+	})
+	local previous_key = vim.env.OPENROUTER_API_KEY
+	vim.env.OPENROUTER_API_KEY = "secret"
+	local results = {}
+	local chunks = {}
+
+	rowdy.generate(options({
+		on_complete = function(result)
+			table.insert(results, result)
+		end,
+	}))
+	rowdy.generate(streaming_options({
+		on_chunk = function(chunk)
+			table.insert(chunks, chunk)
+		end,
+		on_complete = function(result)
+			table.insert(results, result)
+		end,
+	}))
+
+	assert(
+		vim.wait(100, function()
+			return #results == 2
+		end),
+		"empty Generation Requests did not complete"
+	)
+	assert_equal(2, response_index)
+	assert_equal({}, chunks)
+	assert_equal("", results[1].text)
+	assert_equal("", results[2].text)
 
 	vim.env.OPENROUTER_API_KEY = previous_key
 end)
@@ -578,7 +638,7 @@ test("reports typed generation failures exactly once without retries", function(
 		{
 			response = {
 				status = 200,
-				body = '{"id":"gen-1","model":"author/model","choices":[{"text":"partial","finish_reason":"error","error":{"code":502,"message":"Provider failed","metadata":{"provider":"openai"}}}]}',
+				body = '{"id":"gen-1","model":"author/model","choices":[{"message":{"role":"assistant","content":"partial"},"finish_reason":"error","error":{"code":502,"message":"Provider failed","metadata":{"provider":"openai"}}}]}',
 			},
 			expected = {
 				kind = "gateway",
@@ -681,7 +741,7 @@ test("cancels unfinished generation exactly once on Neovim's main loop", functio
 
 	transport_callback(nil, {
 		status = 200,
-		body = '{"id":"gen-1","model":"author/model","choices":[{"text":"late","finish_reason":"stop"}]}',
+		body = '{"id":"gen-1","model":"author/model","choices":[{"message":{"role":"assistant","content":"late"},"finish_reason":"stop"}]}',
 	})
 	cancel()
 	vim.wait(10)
